@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 """
 Daily price tracker for The Hobbit companion-Commander set (HOC) foil cards.
-
-Pulls the current market price for each card in cards.json from the Scryfall
-API (by set + collector number, so no name-matching guesswork) and appends
-one row per card to price_history.csv. Run this once a day (see the
-GitHub Actions workflow) to build up a price history over time.
-
-Scryfall's `prices` block is sourced from TCGplayer (USD) and Cardmarket
-(EUR). It's a daily snapshot, not live/real-time, and it's free with no
-API key required. Docs: https://scryfall.com/docs/api/cards
 """
 
 import csv
@@ -23,7 +14,7 @@ from urllib.error import HTTPError, URLError
 SCRYFALL_BASE = "https://api.scryfall.com/cards/hoc"
 CARDS_FILE = Path(__file__).parent / "cards.json"
 HISTORY_FILE = Path(__file__).parent / "price_history.csv"
-REQUEST_DELAY = 0.15  # Scryfall's guidance: keep it under ~10 req/sec, be polite
+REQUEST_DELAY = 0.15
 
 
 def load_cards():
@@ -33,7 +24,10 @@ def load_cards():
 
 def fetch_card(collector_number):
     url = f"{SCRYFALL_BASE}/{collector_number}"
-    req = Request(url, headers={"User-Agent": "HOC-Price-Tracker/1.0 (personal use)"})
+    req = Request(url, headers={
+        "User-Agent": "HOC-Price-Tracker/1.0 (personal use)",
+        "Accept": "*/*",
+    })
     try:
         with urlopen(req, timeout=15) as resp:
             return json.load(resp)
