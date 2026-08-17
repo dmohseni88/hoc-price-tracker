@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HOC Foil Price Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #14161c;
+    --panel: #1c1f28;
+    --border: #2c303c;
+    --text: #e8e9ed;
+    --muted: #9a9fb0;
+    --accent: #d4a24e;
+    --scryfall: #7aa2f7;
+    --tcg: #f7768e;
+    --manapool: #9ece6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px 16px 60px;
+  }
+  h1 {
+    font-size: 22px;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 24px;
+  }
+  .controls {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    align-items: center;
+  }
+  select, input {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+  select { min-width: 260px; }
+  .card-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .price-row {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .price-stat {
+    min-width: 120px;
+  }
+  .price-stat .label {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .price-stat .value {
+    font-size: 20px;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block;
+  }
+  .dot.scryfall { background: var(--scryfall); }
+  .dot.tcg { background: var(--tcg); }
+  .dot.manapool { background: var(--manapool); }
+  canvas { max-height: 340px; }
+  .grid-view {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .grid-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .grid-card:hover { border-color: var(--accent); }
+  .grid-card .name {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .grid-card .prices {
+    display: flex;
+    gap: 14px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .grid-card .prices b { color: var(--text); }
+  .empty {
+    color: var(--muted);
+    font-size: 14px;
+    padding: 40px 0;
+    text-align: center;
+  }
+  .view-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .view-toggle button {
+    background: var(--panel);
+    color: var(--muted);
+    border: none;
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .view-toggle button.active {
+    background: var(--accent);
+    color: #1a1a1a;
+    font-weight: 600;
+  }
+  .back-link {
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 14px;
+    margin-bottom: 16px;
+    display: inline-block;
+  }
+</style>
+</head>
+<body>
+
+<h1>HOC Foil Price Tracker</h1>
+<div class="subtitle">Scryfall + TCGplayer + Manapool — updated daily via GitHub Actions</div>
+
+<div class="controls">
+  <div class="view-toggle">
+    <button id="btnGrid" class="active">All cards</button>
+    <button id="btnDetail">Single card</button>
+  </div>
+  <select id="cardSelect" style="display:none;"></select>
+</div>
+
+<div id="gridView"></div>
+
+<div id="detailView" style="display:none;">
+  <span class="back-link" id="backLink">&larr; Back to all cards</span>
+  <div class="card-panel">
+    <div class="price-row" id="statRow"></div>
+    <canvas id="priceChart"></canvas>
+  </div>
+</div>
+
+<script>
+const REPO_RAW = "https://raw.githubusercontent.com/dmohseni88/hoc-price-tracker/main";
+
+async function fetchCSV(path) {
+  const res = await fetch(`${REPO_RAW}/${path}`);
+  if (!res.ok) return [];
+  const text = await res.text();
+  const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+  return parsed.data;
+}
+
+async function fetchCards() {
+  const res = await fetch(`${REPO_RAW}/cards.json`);
+  return res.json();
+}
+
+let chartInstance = null;
+
+function groupByCard(rows, numberKey) {
+  const map = {};
+  for (const row of rows) {
+    const num = row[numberKey];
+    if (!num) continue;
+    if (!map[num]) map[num] = [];
+    map[num].push(row);
+  }
+  for (const num in map) map[num].sort((a, b) => a.date.localeCompare(b.date));
+  return map;
+}
+
+function latestNumeric(rows, field) {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const v = parseFloat(rows[i][field]);
+    if (!isNaN(v)) return v;
+  }
+  return null;
+}
+
+function fmtMoney(v) {
+  return v === null || v === undefined || isNaN(v) ? '—' : `$${v.toFixed(2)}`;
+}
+
+(async function init() {
+  const [cards, scryfallRows, tcgRows] = await Promise.all([
+    fetchCards(),
+    fetchCSV('price_history.csv'),
+    fetchCSV('tcgtracking_price_history.csv'),
+  ]);
+
+  const scryfallByCard = groupByCard(scryfallRows, 'collector_number');
+  const tcgByCard = groupByCard(tcgRows, 'collector_number');
+
+  const select = document.getElementById('cardSelect');
+  cards.sort((a, b) => a.name.localeCompare(b.name));
+  for (const c of cards) {
+    const opt = document.createElement('option');
+    opt.value = c.collector_number;
+    opt.textContent = `${c.name} (#${c.collector_number})`;
+    select.appendChild(opt);
+  }
+
+  // ---- Grid view ----
+  const gridView = document.getElementById('gridView');
+  function renderGrid() {
+    gridView.innerHTML = '';
+    const grid = document.createElement('div');
+    grid.className = 'grid-view';
+    for (const c of cards) {
+      const sRows = scryfallByCard[c.collector_number] || [];
+      const tRows = tcgByCard[c.collector_number] || [];
+      const scryfallLatest = latestNumeric(sRows, 'usd_foil');
+      const tcgLatest = latestNumeric(tRows, 'tcg_foil_market');
+      const mpLatest = latestNumeric(tRows, 'manapool_foil');
+
+      const card = document.createElement('div');
+      card.className = 'grid-card';
+      card.innerHTML = `
+        <div class="name">${c.name}</div>
+        <div class="prices">
+          <span><span class="dot scryfall"></span> <b>${fmtMoney(scryfallLatest)}</b></span>
+          <span><span class="dot tcg"></span> <b>${fmtMoney(tcgLatest)}</b></span>
+          <span><span class="dot manapool"></span> <b>${fmtMoney(mpLatest)}</b></span>
+        </div>
+      `;
+      card.addEventListener('click', () => {
+        select.value = c.collector_number;
+        showDetail(c.collector_number);
+      });
+      grid.appendChild(card);
+    }
+    gridView.appendChild(grid);
+  }
+  renderGrid();
+
+  // ---- Detail view ----
+  const detailView = document.getElementById('detailView');
+  const statRow = document.getElementById('statRow');
+
+  function showDetail(collectorNumber) {
+    document.getElementById('btnGrid').classList.remove('active');
+    document.getElementById('btnDetail').classList.add('active');
+    gridView.style.display = 'none';
+    detailView.style.display = 'block';
+    select.style.display = 'inline-block';
+
+    const card = cards.find(c => c.collector_number === collectorNumber);
+    const sRows = scryfallByCard[collectorNumber] || [];
+    const tRows = tcgByCard[collectorNumber] || [];
+
+    const scryfallLatest = latestNumeric(sRows, 'usd_foil');
+    const tcgLatest = latestNumeric(tRows, 'tcg_foil_market');
+    const mpLatest = latestNumeric(tRows, 'manapool_foil');
+
+    statRow.innerHTML = `
+      <div class="price-stat">
+        <div class="label"><span class="dot scryfall"></span> Scryfall (foil)</div>
+        <div class="value">${fmtMoney(scryfallLatest)}</div>
+      </div>
+      <div class="price-stat">
+        <div class="label"><span class="dot tcg"></span> TCGplayer market</div>
+        <div class="value">${fmtMoney(tcgLatest)}</div>
+      </div>
+      <div class="price-stat">
+        <div class="label"><span class="dot manapool"></span> Manapool low</div>
+        <div class="value">${fmtMoney(mpLatest)}</div>
+      </div>
+    `;
+
+    const allDates = [...new Set([
+      ...sRows.map(r => r.date),
+      ...tRows.map(r => r.date),
+    ])].sort();
+
+    const sMap = Object.fromEntries(sRows.map(r => [r.date, parseFloat(r.usd_foil)]));
+    const tMap = Object.fromEntries(tRows.map(r => [r.date, parseFloat(r.tcg_foil_market)]));
+    const mMap = Object.fromEntries(tRows.map(r => [r.date, parseFloat(r.manapool_foil)]));
+
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    if (chartInstance) chartInstance.destroy();
+    chartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: allDates,
+        datasets: [
+          {
+            label: 'Scryfall (foil)',
+            data: allDates.map(d => sMap[d] ?? null),
+            borderColor: '#7aa2f7',
+            backgroundColor: 'transparent',
+            spanGaps: true,
+            tension: 0.2,
+          },
+          {
+            label: 'TCGplayer market',
+            data: allDates.map(d => tMap[d] ?? null),
+            borderColor: '#f7768e',
+            backgroundColor: 'transparent',
+            spanGaps: true,
+            tension: 0.2,
+          },
+          {
+            label: 'Manapool low',
+            data: allDates.map(d => mMap[d] ?? null),
+            borderColor: '#9ece6a',
+            backgroundColor: 'transparent',
+            spanGaps: true,
+            tension: 0.2,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: '#e8e9ed' } },
+          title: { display: true, text: card ? card.name : '', color: '#e8e9ed', font: { size: 16 } },
+        },
+        scales: {
+          x: { ticks: { color: '#9a9fb0' }, grid: { color: '#2c303c' } },
+          y: { ticks: { color: '#9a9fb0' }, grid: { color: '#2c303c' } },
+        },
+      },
+    });
+  }
+
+  document.getElementById('btnGrid').addEventListener('click', () => {
+    document.getElementById('btnGrid').classList.add('active');
+    document.getElementById('btnDetail').classList.remove('active');
+    gridView.style.display = 'block';
+    detailView.style.display = 'none';
+    select.style.display = 'none';
+  });
+  document.getElementById('btnDetail').addEventListener('click', () => {
+    if (select.value) showDetail(select.value);
+  });
+  document.getElementById('backLink').addEventListener('click', () => {
+    document.getElementById('btnGrid').click();
+  });
+  select.addEventListener('change', () => showDetail(select.value));
+
+  if (cards.length && !scryfallRows.length && !tcgRows.length) {
+    gridView.innerHTML = '<div class="empty">No price history yet — check back after the next scheduled run.</div>';
+  }
+})();
+</script>
+
+</body>
+</html>
