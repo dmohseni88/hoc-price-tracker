@@ -1,0 +1,30 @@
+name: Track HOC Prices
+
+on:
+  schedule:
+    - cron: '0 13 * * *'  # 13:00 UTC daily — adjust as you like
+  workflow_dispatch: {}    # lets you trigger a manual run from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  track-prices:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Fetch and log today's prices
+        run: python track_prices.py
+
+      - name: Commit updated history
+        run: |
+          git config user.name "hoc-price-tracker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add price_history.csv
+          git diff --staged --quiet || git commit -m "Price update $(date -u +%Y-%m-%d)"
+          git push
