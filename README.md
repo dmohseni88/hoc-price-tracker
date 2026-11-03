@@ -23,8 +23,11 @@ API](https://scryfall.com/docs/api/cards) (which mirrors TCGplayer market price)
   via the free TCGTracking.com API, appends to `tcgtracking_price_history.csv`.
 - `trend.py` — reads the Scryfall history and prints latest price + 7d/30d
   % change + min/max seen per card. Run locally any time: `python trend.py`.
+- `build_ck_index.py` — downloads Card Kingdom's full pricelist (~70 MB) and
+  trims it to `ck_prices.json` (~10 MB, one entry per printing) for the Buy List.
 - `docs/index.html` — the visual dashboard (see below).
-- `.github/workflows/track-prices.yml` — the daily cron, runs both trackers.
+- `.github/workflows/track-prices.yml` — the daily cron, runs both trackers and
+  rebuilds the Card Kingdom index.
 
 ## Dashboard (GitHub Pages)
 
@@ -35,6 +38,32 @@ plus a per-card price-history chart.
 To turn it on: repo **Settings → Pages → Source** → set to **Deploy from a
 branch**, branch **main**, folder **/docs** → Save. After a minute or two
 it'll be live at `https://dmohseni88.github.io/hoc-price-tracker/`.
+
+## Buy List
+
+The **Buy List** tab (`#/buy`) prices any cards you paste in, not just HOC.
+Paste a list in the usual formats (`4 Lightning Bolt`, `4x Lightning Bolt`,
+`1 Sol Ring (CMM) 400 *F*`, or just a name) and hit **Price it**
+(Ctrl+Enter works too). Per card it shows:
+
+- **TCGplayer** market price (cheapest listing underneath) and **Manapool**
+  near-mint, via TCGTracking — checked on the two cheapest printings.
+- **Card Kingdom** cheapest in-stock printing, plus what CK would pay you
+  (buylist) for that printing.
+- **Cardmarket** € from Scryfall, for reference (not in the USD totals).
+
+Then totals for buying everything from each site, and the **cheapest mix**
+(each card from whichever site is lowest). **Copy results** puts a text
+summary on your clipboard. Your last pasted list is remembered in the browser.
+
+A set code + collector number pins that exact printing; without one (or with
+"Ignore set codes" ticked) it hunts for the cheapest printing. Typos are
+usually fine — Scryfall's fuzzy match fills in the card.
+
+Card Kingdom data comes from `ck_prices.json` on the **`ck-data` branch**.
+The workflow rebuilds it daily and force-pushes that branch as a single
+commit, so the 10 MB file doesn't pile up in `main`'s history. Until the
+workflow has run once, the Card Kingdom columns show "—".
 
 ## Notes
 

@@ -128,6 +128,33 @@ main{max-width:var(--maxw);margin:0 auto;padding:36px 24px 90px}
 .back-link{display:inline-block;margin-bottom:26px;color:var(--dim);font-family:"Cormorant",serif;text-transform:uppercase;letter-spacing:.14em;font-size:.78rem;font-weight:600}
 .back-link:hover{color:var(--gold)}
 
+/* ── Buy List ──────────────────────────────────────────── */
+.buy-input{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:28px}
+.buy-input textarea{width:100%;min-height:180px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border-strong);border-radius:10px;padding:14px;font-family:"JetBrains Mono",monospace;font-size:.88rem;line-height:1.55}
+.buy-input textarea:focus{outline:none;border-color:var(--gold)}
+.buy-controls{display:flex;align-items:center;gap:22px;flex-wrap:wrap;margin-top:14px}
+.buy-controls .pill-btn{margin-top:0;margin-left:auto;border:none;cursor:pointer}
+.chk{display:flex;align-items:center;gap:8px;color:var(--dim);font-style:italic;cursor:pointer}
+.chk input{accent-color:var(--gold);width:16px;height:16px}
+.ghost-btn{background:none;border:1px solid var(--border-strong);color:var(--dim);border-radius:999px;padding:8px 16px;font-family:"Cormorant",serif;text-transform:uppercase;letter-spacing:.14em;font-size:.72rem;font-weight:600;cursor:pointer}
+.ghost-btn:hover{color:var(--text);border-color:var(--gold)}
+.table-scroll{overflow-x:auto;margin:0 -4px}
+.buy-table td{padding:10px 12px}
+.buy-table .thumb{width:34px;border-radius:3px;display:block}
+.buy-table .cardcell{display:flex;align-items:center;gap:12px;min-width:220px}
+.buy-table .print{color:var(--dim);font-size:.75rem;font-family:"JetBrains Mono",monospace}
+.buy-table .sub-p{display:block;color:var(--dim);font-size:.7rem}
+.buy-table .best{color:var(--gold);font-weight:600}
+.buy-table .ck{color:#c7a0d8}
+.buy-table .eur{color:var(--dim)}
+.buy-table tfoot td{border-top:1px solid var(--border-strong);border-bottom:none;font-weight:600}
+.buy-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1px;background:var(--border);border:1px solid var(--border);border-radius:14px;overflow:hidden;margin:0 0 26px}
+.buy-summary .stat{padding:18px 20px}
+.buy-summary .stat .k{font-size:1.5rem}
+.buy-summary .stat .m{color:var(--dim);font-size:.78rem;font-style:italic;margin-top:2px}
+.buy-summary .stat.win .k{color:var(--gold)}
+.muted{color:var(--dim)}
+
 /* ── Misc ──────────────────────────────────────────────── */
 .notice{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px 22px;color:var(--dim);font-style:italic}
 .notice.err{border-color:#5c2b2e;color:#ff8a80}
@@ -140,6 +167,10 @@ footer a{color:var(--gold)}
   .statrow{grid-template-columns:1fr}
   .detail-stats .cell{border-right:none;border-bottom:1px solid var(--border)}
   .detail-stats .cell:last-child{border-bottom:none}
+  .nav{flex-wrap:wrap;padding:12px 16px}
+  .nav-links{gap:14px;flex-wrap:wrap}
+  main{padding:28px 16px 70px}
+  .buy-controls .pill-btn{margin-left:0;width:100%;text-align:center}
 }
 </style>
 </head>
@@ -152,6 +183,7 @@ footer a{color:var(--gold)}
       <a href="#/overview" data-route="overview">Overview</a>
       <a href="#/cards" data-route="cards">All Cards</a>
       <a href="#/card" data-route="card">Single Card</a>
+      <a href="#/buy" data-route="buy">Buy List</a>
     </nav>
   </div>
 </header>
@@ -500,6 +532,339 @@ function drawChart(c){
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+   BUY LIST — paste any cards, compare TCGplayer / Manapool / Card Kingdom
+   Scryfall finds the printings; TCGTracking supplies TCGplayer + Manapool;
+   Card Kingdom comes from the trimmed index the daily workflow builds.
+   ══════════════════════════════════════════════════════════════════════ */
+const SCRY_API = "https://api.scryfall.com";
+const TT_API   = "https://tcgtracking.com/tcgapi/v1";
+const CK_URL   = "https://raw.githubusercontent.com/dmohseni88/hoc-price-tracker/ck-data/ck_prices.json";
+const BUY_KEY  = "hoard.buylist";
+const SITES = {
+  tcg:{label:"TCGplayer",    cls:"src-tcg"},
+  mp: {label:"Manapool",     cls:"src-mp"},
+  ck: {label:"Card Kingdom", cls:"ck"},
+};
+let ckPromise = null;     // Card Kingdom index, loaded on first lookup
+let ckInfo = null;
+const ttSetCache = {};    // TCGplayer group id -> set pricing promise
+let buyRows = [];
+let buyRun = 0;           // bumps on each lookup so stale results are dropped
+
+const store = {
+  get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
+  set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} },
+};
+
+// Scryfall asks for ~10 requests/sec max, so every call goes through one gate.
+let scryGate = Promise.resolve();
+function scryFetch(path){
+  const p = scryGate.then(()=>fetch(SCRY_API+path, {headers:{Accept:"application/json"}}));
+  const pause = ()=>new Promise(r=>setTimeout(r,110));
+  scryGate = p.then(pause, pause);
+  return p.then(r => r.ok ? r.json() : r.status===404 ? null : Promise.reject(new Error("Scryfall "+r.status)));
+}
+const getJSON = (url) => fetch(url).then(r=>r.ok?r.json():null).catch(()=>null);
+
+function loadCK(){
+  if(!ckPromise) ckPromise = getJSON(CK_URL).then(d => { ckInfo = d; return d; });
+  return ckPromise;
+}
+
+// Accepts "4 Lightning Bolt", "4x Lightning Bolt", "1 Sol Ring (CMM) 400 *F*", "Sol Ring", etc.
+function parseList(text){
+  const out = [];
+  for(const raw of text.split(/\r?\n/)){
+    let s = raw.trim();
+    if(!s || /^(\/\/|#)/.test(s) || /^(deck|sideboard|commander|companion|maybeboard|mainboard)\s*:?$/i.test(s)) continue;
+    let foil = false;
+    s = s.replace(/\s*(\*F\*|\*E\*|\((foil|etched)\)|\[(foil|etched)\])\s*$/i, ()=>{ foil = true; return ""; });
+    const q = s.match(/^(\d+)\s*x?\s+(.+)$/i);
+    const qty = q ? parseInt(q[1],10) : 1;
+    if(q) s = q[2];
+    let set = null, cn = null;
+    const sm = s.match(/^(.*?)\s*[([]([A-Za-z0-9]{2,6})[)\]]\s*([A-Za-z0-9★-]+)?\s*$/);
+    if(sm && sm[1]){ s = sm[1]; set = sm[2].toLowerCase(); cn = sm[3] || null; }
+    if(s) out.push({qty, name:s.trim(), set, cn, foil});
+  }
+  return out;
+}
+
+async function findPrintings(item, anyPrint){
+  if(item.set && !anyPrint){
+    const c = item.cn ? await scryFetch(`/cards/${item.set}/${encodeURIComponent(item.cn)}`)
+                      : await scryFetch(`/cards/named?exact=${encodeURIComponent(item.name)}&set=${item.set}`);
+    if(c) return {prints:[c], exact:true};
+  }
+  // skip gold-bordered World Championship decks, oversized cards, etc. — not real copies to buy
+  const search = (q) => scryFetch(`/cards/search?unique=prints&q=${encodeURIComponent(q+" game:paper -st:memorabilia -is:oversized")}`);
+  let res = await search(`!"${item.name.replace(/"/g,"")}"`);
+  if(!res){
+    // typo or partial name — let Scryfall's fuzzy match pick the card, then get its printings
+    const named = await scryFetch(`/cards/named?fuzzy=${encodeURIComponent(item.name)}`);
+    const oid = named && (named.oracle_id || (named.card_faces||[])[0]?.oracle_id);
+    if(oid) res = await search(`oracleid:${oid}`);
+  }
+  let prints = res ? res.data : [];
+  // `!"Lightning Bolt"` also matches cards with Lightning Bolt as a back face — prefer the card itself
+  const want = item.name.toLowerCase();
+  const same = prints.filter(c => c.name.toLowerCase()===want || c.name.toLowerCase().split(" // ")[0]===want);
+  if(same.length) prints = same;
+  return {prints, exact:false};
+}
+
+const hasFinish = (c, foil) => (c.finishes||[]).some(f => foil ? (f==="foil"||f==="etched") : f==="nonfoil");
+const scryPrice = (c, foil) => foil ? (num(c.prices.usd_foil) ?? num(c.prices.usd_etched)) : num(c.prices.usd);
+const printLabel = (c) => `${c.set.toUpperCase()} #${c.collector_number}`;
+const cardImg = (c) => (c.image_uris || (c.card_faces||[])[0]?.image_uris || {}).small || "";
+
+function pickTcgVariant(tcg, foil){
+  const k = Object.keys(tcg||{}).find(k => foil ? (/foil/i.test(k) && !/non/i.test(k)) : /^normal$/i.test(k));
+  return k ? tcg[k] : null;
+}
+
+// TCGplayer low/market + Manapool for one TCGplayer product.
+// The product endpoint gives the set id; the set pricing endpoint is fresher, so prefer it.
+async function ttPrices(tcgId, foil){
+  const prod = await getJSON(`${TT_API}/products/${tcgId}`);
+  if(!prod || !prod.product) return null;
+  const gid = prod.product.group_id;
+  const setP = ttSetCache[gid] || (ttSetCache[gid] = getJSON(`${TT_API}/1/sets/${gid}/pricing`));
+  const entry = ((await setP)||{}).prices?.[String(tcgId)] || {};
+  const prodMp = prod.prices?.manapool || {};
+  let tcg = pickTcgVariant(entry.tcg, foil);
+  if(!tcg){
+    const p = (prod.prices?.tcgplayer||[]).find(p => foil ? /foil/i.test(p.sub_type_name) : /^normal$/i.test(p.sub_type_name));
+    if(p) tcg = {low:p.low_price, market:p.market_price};
+  }
+  const mp = num(entry.manapool?.[foil?"foil":"normal"]) ??
+             num(foil ? (prodMp.fo_nm ?? prodMp.fo_low) : (prodMp.nf_nm ?? prodMp.nf_low));
+  return {
+    tcgLow: tcg ? num(tcg.low) : null, tcgMkt: tcg ? num(tcg.market) : null, mp,
+    tcgUrl: prod.product.url || null, mpUrl: prodMp.manapool_url || null,
+  };
+}
+
+async function priceItem(item, opts){
+  const foil = item.foil || opts.foil;
+  const row = {...item, foil, status:"ok", sites:{}, ckBuy:null, eur:null, img:"", scryUrl:"", exact:false};
+  const found = await findPrintings(item, opts.anyPrint);
+  if(!found.prints.length){ row.status = "Not found on Scryfall"; return row; }
+  row.name = found.prints[0].name;
+  row.exact = found.exact;
+  const prints = found.prints.filter(c => hasFinish(c, foil));
+  if(!prints.length){ row.status = foil ? "No foil printing" : "Only exists in foil"; return row; }
+
+  // cheapest-looking printings first (by Scryfall's TCGplayer market price)
+  const ranked = prints.slice().sort((a,b)=>(scryPrice(a,foil)??1e9)-(scryPrice(b,foil)??1e9));
+  row.img = cardImg(ranked[0]);
+  row.scryUrl = ranked[0].scryfall_uri;
+
+  // Card Kingdom — cheapest in-stock printing. Buylist is for that same printing
+  // (or the lowest offer across printings), so it reflects the copy you'd actually own.
+  const ck = await loadCK();
+  if(ck){
+    let ckBuyPick = null, minBuy = null;
+    for(const c of prints){
+      const e = ck.cards[c.id.replace(/-/g,"").slice(0,12)];
+      if(!e) continue;
+      const r = e[foil?4:1], b = e[foil?5:2];
+      const url = ck.base_url + (e[foil?3:0] || e[0] || e[3]);
+      if(r!=null && (!row.sites.ck || r<row.sites.ck.p)){
+        row.sites.ck = {p:r, url, print:printLabel(c)};
+        ckBuyPick = b!=null ? {p:b, url, print:printLabel(c)} : null;
+      }
+      if(b!=null && (!minBuy || b<minBuy.p)) minBuy = {p:b, url, print:printLabel(c)};
+    }
+    row.ckBuy = ckBuyPick || minBuy;
+  }
+
+  // Cardmarket € — reference only, not part of the USD totals
+  for(const c of prints){
+    const e = num(c.prices[foil?"eur_foil":"eur"]);
+    if(e!=null && (!row.eur || e<row.eur.p)) row.eur = {p:e, url:c.purchase_uris?.cardmarket || "", print:printLabel(c)};
+  }
+
+  // TCGplayer + Manapool — check the two cheapest printings
+  const cands = ranked.filter(c=>c.tcgplayer_id).slice(0,2);
+  const tts = await Promise.all(cands.map(c => ttPrices(c.tcgplayer_id, foil).then(t => t && {...t, c}).catch(()=>null)));
+  for(const t of tts){
+    if(!t) continue;
+    // market price, not the lowest listing — "low" is often one damaged or foreign copy
+    const tp = t.tcgMkt ?? t.tcgLow;
+    if(tp!=null && (!row.sites.tcg || tp<row.sites.tcg.p))
+      row.sites.tcg = {p:tp, low:t.tcgLow, url:t.tcgUrl || tcgSearch(row.name), print:printLabel(t.c)};
+    if(t.mp!=null && (!row.sites.mp || t.mp<row.sites.mp.p))
+      row.sites.mp = {p:t.mp, url:t.mpUrl || mpSearch(row.name), print:printLabel(t.c)};
+  }
+  // TCGTracking had nothing — fall back to Scryfall's copy of the TCGplayer market price
+  if(!row.sites.tcg){
+    const c = ranked.find(c=>scryPrice(c,foil)!=null);
+    if(c) row.sites.tcg = {p:scryPrice(c,foil), low:null, url:c.purchase_uris?.tcgplayer || tcgSearch(row.name), print:printLabel(c)};
+  }
+  if(!Object.keys(row.sites).length) row.status = "No prices listed";
+  return row;
+}
+
+const bestSite = (row) => {
+  const ks = Object.keys(row.sites);
+  return ks.length ? ks.reduce((a,b)=>row.sites[a].p<=row.sites[b].p?a:b) : null;
+};
+
+function buySummary(rows){
+  const done = rows.filter(r=>r.status==="ok");
+  const per = {};
+  for(const k of Object.keys(SITES)){
+    let total=0, missing=0;
+    for(const r of done){ if(r.sites[k]) total += r.qty*r.sites[k].p; else missing += r.qty; }
+    per[k] = {total, missing};
+  }
+  let mix=0; const mixBy={};
+  for(const r of done){
+    const k = bestSite(r); if(!k) continue;
+    mix += r.qty*r.sites[k].p;
+    (mixBy[k] || (mixBy[k]={n:0,total:0})).n += r.qty;
+    mixBy[k].total += r.qty*r.sites[k].p;
+  }
+  const buylist = done.reduce((s,r)=>s + (r.ckBuy ? r.qty*r.ckBuy.p : 0), 0);
+  return {per, mix, mixBy, buylist};
+}
+
+function siteCell(row, k){
+  const s = row.sites[k];
+  if(!s) return `<td class="num muted">—</td>`;
+  const best = bestSite(row)===k ? " best" : "";
+  const mkt = (k==="tcg" && s.low!=null && s.low<s.p) ? `<span class="sub-p">low ${money(s.low)}</span>` : "";
+  return `<td class="num"><a class="mono ${SITES[k].cls}${best}" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(s.print)}">${money(s.p)}</a>${mkt}</td>`;
+}
+
+function buyRowHTML(r){
+  const pending = r.status==="pending";
+  const k = pending ? null : bestSite(r);
+  const where = r.set && r.exact ? `${r.set.toUpperCase()}${r.cn?" #"+r.cn:""}` : (r.set ? "any printing (set not found)" : "any printing");
+  const card = `<div class="cardcell">
+      ${r.img ? `<a href="${esc(r.scryUrl)}" target="_blank" rel="noopener"><img class="thumb" src="${esc(r.img)}" alt="" loading="lazy"></a>` : `<span style="width:34px"></span>`}
+      <div><div class="cname">${esc(r.name)}${r.foil?` <span class="badge low">Foil</span>`:""}</div>
+      <div class="print">${esc(where)}</div></div></div>`;
+  if(pending) return `<tr><td class="num mono">${r.qty}</td><td>${card}</td><td colspan="7" class="muted"><i>Looking up…</i></td></tr>`;
+  if(r.status!=="ok") return `<tr><td class="num mono">${r.qty}</td><td>${card}</td><td colspan="7" style="color:#ff8a80"><i>${esc(r.status)}</i></td></tr>`;
+  const ckBuy = r.ckBuy ? `<a class="mono ck" href="${esc(r.ckBuy.url)}" target="_blank" rel="noopener" title="${esc(r.ckBuy.print)}">${money(r.ckBuy.p)}</a>` : "—";
+  const eur = r.eur ? `<a class="mono eur" href="${esc(r.eur.url)}" target="_blank" rel="noopener" title="${esc(r.eur.print)}">€${r.eur.p.toFixed(2)}</a>` : "—";
+  return `<tr>
+    <td class="num mono">${r.qty}</td><td>${card}</td>
+    ${siteCell(r,"tcg")}${siteCell(r,"mp")}${siteCell(r,"ck")}
+    <td class="eyebrow ${k?SITES[k].cls:""}" style="letter-spacing:.1em">${k?SITES[k].label:"—"}</td>
+    <td class="num mono best">${k?money(r.qty*r.sites[k].p):"—"}</td>
+    <td class="num muted">${ckBuy}</td><td class="num">${eur}</td>
+  </tr>`;
+}
+
+function renderBuyResults(){
+  const out = $("#buyOut");
+  if(!out) return;
+  if(!buyRows.length){ out.innerHTML = ""; return; }
+  const sum = buySummary(buyRows);
+  const pending = buyRows.filter(r=>r.status==="pending").length;
+  const failed = buyRows.filter(r=>r.status!=="ok" && r.status!=="pending").length;
+  const cards = buyRows.reduce((s,r)=>s+r.qty,0);
+
+  const siteStats = Object.entries(SITES).map(([k,s])=>`
+    <div class="stat"><div class="k mono ${s.cls}">${money(sum.per[k].total)}</div>
+      <div class="l eyebrow">All from ${s.label}</div>
+      <div class="m">${sum.per[k].missing ? `${sum.per[k].missing} card${sum.per[k].missing>1?"s":""} not listed` : "every card listed"}</div></div>`).join("");
+  const mixNote = Object.entries(sum.mixBy).map(([k,v])=>`${v.n} from ${SITES[k].label}`).join(" · ");
+
+  const ckNote = ckInfo ? `Card Kingdom prices as of ${esc(ckInfo.updated)}`
+    : (ckPromise ? `Card Kingdom data isn't available yet — it's built by the daily workflow` : "");
+
+  out.innerHTML = `
+    <div class="grid-controls" style="margin-bottom:14px">
+      <div class="updated">${pending ? `Pricing ${cards} cards… ${buyRows.length-pending} of ${buyRows.length} lines done` :
+        `${cards} cards · ${buyRows.length} lines${failed?` · ${failed} not priced`:""}`}</div>
+      <button class="ghost-btn" id="buyCopy">Copy results</button>
+    </div>
+    <section class="buy-summary">
+      <div class="stat win"><div class="k mono">${money(sum.mix)}</div><div class="l eyebrow">Cheapest mix</div><div class="m">${esc(mixNote||"—")}</div></div>
+      ${siteStats}
+      <div class="stat"><div class="k mono ck">${money(sum.buylist)}</div><div class="l eyebrow">CK buylist</div><div class="m">what Card Kingdom would pay</div></div>
+    </section>
+    <div class="table-scroll"><table class="spread-table buy-table">
+      <thead><tr>
+        <th class="num">Qty</th><th>Card</th>
+        <th class="num src-tcg">TCGplayer</th><th class="num src-mp">Manapool</th><th class="num ck">Card Kingdom</th>
+        <th>Best</th><th class="num">Line total</th><th class="num">CK buys at</th><th class="num">Cardmarket</th>
+      </tr></thead>
+      <tbody>${buyRows.map(buyRowHTML).join("")}</tbody>
+    </table></div>
+    <p class="lowline" style="margin-top:18px">TCGplayer market price (cheapest listing beneath, any condition) · Manapool near-mint ·
+      Card Kingdom near-mint in stock · hover a price to see which printing it's for. ${ckNote}</p>`;
+  $("#buyCopy").addEventListener("click", copyBuyResults);
+}
+
+function copyBuyResults(){
+  const lines = buyRows.map(r=>{
+    const k = r.status==="ok" ? bestSite(r) : null;
+    if(!k) return `${r.qty}x ${r.name} — ${r.status==="ok"?"no price":r.status}`;
+    const s = r.sites[k];
+    return `${r.qty}x ${r.name}${r.foil?" (foil)":""} — ${money(s.p)} @ ${SITES[k].label} (${s.print}) = ${money(r.qty*s.p)}`;
+  });
+  const sum = buySummary(buyRows);
+  lines.push("", `Cheapest mix: ${money(sum.mix)}`,
+    ...Object.entries(SITES).map(([k,s])=>`All from ${s.label}: ${money(sum.per[k].total)}${sum.per[k].missing?` (${sum.per[k].missing} missing)`:""}`));
+  const btn = $("#buyCopy");
+  navigator.clipboard.writeText(lines.join("\n"))
+    .then(()=>{ btn.textContent = "Copied"; setTimeout(()=>{ btn.textContent = "Copy results"; }, 1500); })
+    .catch(()=>{ btn.textContent = "Copy failed"; });
+}
+
+async function runBuyLookup(){
+  const text = $("#buytext").value;
+  store.set(BUY_KEY, text);
+  const opts = {foil:$("#optFoil").checked, anyPrint:$("#optAny").checked};
+  store.set(BUY_KEY+".opts", JSON.stringify(opts));
+  const items = parseList(text);
+  const run = ++buyRun;
+  buyRows = items.map(it => ({...it, status:"pending", sites:{}, foil:it.foil||opts.foil}));
+  renderBuyResults();
+  loadCK();
+
+  let next = 0;
+  const worker = async () => {
+    while(next < items.length){
+      const i = next++;
+      let row;
+      try{ row = await priceItem(items[i], opts); }
+      catch(e){ row = {...buyRows[i], status:"Lookup failed — "+e.message}; }
+      if(run !== buyRun) return;
+      buyRows[i] = row;
+      renderBuyResults();
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+}
+
+function renderBuy(){
+  destroyChart();
+  let opts = {};
+  try{ opts = JSON.parse(store.get(BUY_KEY+".opts") || "{}"); }catch(e){}
+  view().innerHTML = `
+    <div class="section-title"><h2>Buy list</h2><span class="eyebrow">paste cards · compare the houses</span></div>
+    <div class="buy-input">
+      <textarea id="buytext" spellcheck="false" placeholder="1 Sol Ring&#10;4x Lightning Bolt&#10;1 Rhystic Study (PCY) 45 *F*&#10;Smothering Tithe"></textarea>
+      <div class="buy-controls">
+        <label class="chk"><input type="checkbox" id="optFoil"${opts.foil?" checked":""}> Price everything as foil</label>
+        <label class="chk"><input type="checkbox" id="optAny"${opts.anyPrint?" checked":""}> Ignore set codes, find the cheapest printing</label>
+        <button class="pill-btn" id="buyGo">Price it</button>
+      </div>
+    </div>
+    <div id="buyOut"></div>`;
+  $("#buytext").value = store.get(BUY_KEY) || "";
+  $("#buyGo").addEventListener("click", runBuyLookup);
+  $("#buytext").addEventListener("keydown", e => { if(e.key==="Enter" && (e.ctrlKey||e.metaKey)) runBuyLookup(); });
+  renderBuyResults();
+}
+
+/* ══════════════════════════════════════════════════════════════════════
    ROUTER
    ══════════════════════════════════════════════════════════════════════ */
 function setActive(route){
@@ -507,9 +872,11 @@ function setActive(route){
     a.classList.toggle("active", a.dataset.route===route));
 }
 function route(){
-  if(!MODEL) return;
   const hash = location.hash.replace(/^#\/?/,"");
   const [seg, id] = hash.split("/");
+  // Buy List doesn't need the HOC history, so it works even if that failed to load
+  if(seg==="buy"){ setActive("buy"); renderBuy(); window.scrollTo(0,0); return; }
+  if(!MODEL) return;
   if(seg==="cards"){ setActive("cards"); renderGrid(); }
   else if(seg==="card"){ setActive("card"); id ? renderDetail(id) : renderCardPicker(); }
   else { setActive("overview"); renderOverview(); }
@@ -526,6 +893,7 @@ window.addEventListener("hashchange", route);
     if(!location.hash) location.hash = "#/overview";
     route();
   }catch(err){
+    if(location.hash.startsWith("#/buy")){ route(); return; }
     view().innerHTML = `<div class="notice err">Couldn't load price data — ${esc(err.message)}.
       <br>Check that the repo is public and the CSVs exist at raw.githubusercontent.com.</div>`;
     console.error(err);

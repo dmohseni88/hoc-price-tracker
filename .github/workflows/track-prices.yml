@@ -31,3 +31,24 @@ jobs:
           git add price_history.csv tcgtracking_price_history.csv
           git diff --staged --quiet || git commit -m "Price update $(date -u +%Y-%m-%d)"
           git push
+
+      # Card Kingdom index for the Buy List page. It's ~10 MB and changes daily, so it
+      # lives alone on the `ck-data` branch (force-pushed, one commit) instead of main.
+      - name: Build Card Kingdom index
+        continue-on-error: true
+        run: python build_ck_index.py "$RUNNER_TEMP/ck_prices.json"
+
+      - name: Publish Card Kingdom index to ck-data branch
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test -f "$RUNNER_TEMP/ck_prices.json" || exit 0
+          mkdir -p "$RUNNER_TEMP/ck-data" && cd "$RUNNER_TEMP/ck-data"
+          cp ../ck_prices.json .
+          git init -q -b ck-data
+          git config user.name "hoc-price-tracker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add ck_prices.json
+          git commit -qm "Card Kingdom index $(date -u +%Y-%m-%d)"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ck-data
