@@ -56,6 +56,11 @@ Then totals for buying everything from each site, and the **cheapest mix**
 (each card from whichever site is lowest). **Copy results** puts a text
 summary on your clipboard. Your last pasted list is remembered in the browser.
 
+Click **N printings ▾** under a card to open a dropdown of every printing
+with its TCGplayer / Manapool / Card Kingdom / buylist / Cardmarket prices
+(cheapest in each column in gold). **Use** prices that line with that
+printing; **Use cheapest printing** goes back.
+
 A set code + collector number pins that exact printing; without one (or with
 "Ignore set codes" ticked) it hunts for the cheapest printing. Typos are
 usually fine — Scryfall's fuzzy match fills in the card.

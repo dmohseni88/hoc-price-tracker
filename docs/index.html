@@ -154,6 +154,18 @@ main{max-width:var(--maxw);margin:0 auto;padding:36px 24px 90px}
 .buy-summary .stat .m{color:var(--dim);font-size:.78rem;font-style:italic;margin-top:2px}
 .buy-summary .stat.win .k{color:var(--gold)}
 .muted{color:var(--dim)}
+.prints-toggle{background:none;border:none;color:var(--gold);font-family:"JetBrains Mono",monospace;font-size:.72rem;cursor:pointer;padding:0 0 0 6px}
+.prints-toggle:hover{text-decoration:underline}
+.buy-table .prints-row > td{background:var(--panel);padding:4px 12px 16px}
+.buy-table .prints-row:hover > td{background:var(--panel)}
+.prints-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0}
+.prints-table td{padding:6px 10px}
+.prints-table tr:hover td{background:var(--panel-2)}
+.prints-table tr.pinned td{background:rgba(201,151,95,.08)}
+.prints-table .thumb{width:26px}
+.prints-table .cardcell{min-width:200px;gap:10px}
+.prints-table .pset{font-size:.9rem;line-height:1.2}
+.prints-table .ghost-btn{padding:4px 12px}
 
 /* ── Misc ──────────────────────────────────────────────── */
 .notice{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px 22px;color:var(--dim);font-style:italic}
@@ -590,27 +602,33 @@ function parseList(text){
   return out;
 }
 
+// Returns every paper printing of the card, plus the exact printing if the line named one.
 async function findPrintings(item, anyPrint){
+  // skip gold-bordered World Championship decks, oversized cards, etc. — not real copies to buy
+  const search = (q) => scryFetch(`/cards/search?unique=prints&q=${encodeURIComponent(q+" game:paper -st:memorabilia -is:oversized")}`);
+  const oracleOf = (c) => c && (c.oracle_id || (c.card_faces||[])[0]?.oracle_id);
   if(item.set && !anyPrint){
     const c = item.cn ? await scryFetch(`/cards/${item.set}/${encodeURIComponent(item.cn)}`)
                       : await scryFetch(`/cards/named?exact=${encodeURIComponent(item.name)}&set=${item.set}`);
-    if(c) return {prints:[c], exact:true};
+    if(c){
+      const res = oracleOf(c) ? await search(`oracleid:${oracleOf(c)}`) : null;
+      const prints = res ? res.data : [];
+      if(!prints.some(p=>p.id===c.id)) prints.unshift(c);
+      return {prints, exact:c};
+    }
   }
-  // skip gold-bordered World Championship decks, oversized cards, etc. — not real copies to buy
-  const search = (q) => scryFetch(`/cards/search?unique=prints&q=${encodeURIComponent(q+" game:paper -st:memorabilia -is:oversized")}`);
   let res = await search(`!"${item.name.replace(/"/g,"")}"`);
   if(!res){
     // typo or partial name — let Scryfall's fuzzy match pick the card, then get its printings
     const named = await scryFetch(`/cards/named?fuzzy=${encodeURIComponent(item.name)}`);
-    const oid = named && (named.oracle_id || (named.card_faces||[])[0]?.oracle_id);
-    if(oid) res = await search(`oracleid:${oid}`);
+    if(oracleOf(named)) res = await search(`oracleid:${oracleOf(named)}`);
   }
   let prints = res ? res.data : [];
   // `!"Lightning Bolt"` also matches cards with Lightning Bolt as a back face — prefer the card itself
   const want = item.name.toLowerCase();
   const same = prints.filter(c => c.name.toLowerCase()===want || c.name.toLowerCase().split(" // ")[0]===want);
   if(same.length) prints = same;
-  return {prints, exact:false};
+  return {prints, exact:null};
 }
 
 const hasFinish = (c, foil) => (c.finishes||[]).some(f => foil ? (f==="foil"||f==="etched") : f==="nonfoil");
@@ -645,65 +663,110 @@ async function ttPrices(tcgId, foil){
   };
 }
 
+// Everything the printings dropdown needs about one printing. `tt` (TCGplayer + Manapool)
+// is filled in lazily — undefined means not fetched yet, null means TCGTracking had nothing.
+function printInfo(c, foil, ck){
+  const e = ck && ck.cards[c.id.replace(/-/g,"").slice(0,12)];
+  return {
+    id:c.id, label:printLabel(c), setName:c.set_name, img:cardImg(c), scryUrl:c.scryfall_uri,
+    tcgplayerId:c.tcgplayer_id || null, usd:scryPrice(c, foil),
+    tcgUrl:c.purchase_uris?.tcgplayer || null,
+    eur:num(c.prices[foil?"eur_foil":"eur"]), cmUrl:c.purchase_uris?.cardmarket || "",
+    ck: e ? {r:e[foil?4:1], b:e[foil?5:2], url:ck.base_url + (e[foil?3:0] || e[0] || e[3])} : null,
+    tt: undefined,
+  };
+}
+
+function loadTT(p, foil){
+  if(p.tt !== undefined || !p.tcgplayerId) return Promise.resolve(p.tt ?? null);
+  if(!p.ttP) p.ttP = ttPrices(p.tcgplayerId, foil).catch(()=>null).then(t => (p.tt = t));
+  return p.ttP;
+}
+
 async function priceItem(item, opts){
   const foil = item.foil || opts.foil;
-  const row = {...item, foil, status:"ok", sites:{}, ckBuy:null, eur:null, img:"", scryUrl:"", exact:false};
+  const row = {...item, foil, status:"ok", sites:{}, ckBuy:null, eur:null, img:"", scryUrl:"",
+               prints:[], pinId:null, pinMiss:false, open:false};
   const found = await findPrintings(item, opts.anyPrint);
   if(!found.prints.length){ row.status = "Not found on Scryfall"; return row; }
-  row.name = found.prints[0].name;
-  row.exact = found.exact;
-  const prints = found.prints.filter(c => hasFinish(c, foil));
-  if(!prints.length){ row.status = foil ? "No foil printing" : "Only exists in foil"; return row; }
-
+  row.name = (found.exact || found.prints[0]).name;
+  const ck = await loadCK();
   // cheapest-looking printings first (by Scryfall's TCGplayer market price)
-  const ranked = prints.slice().sort((a,b)=>(scryPrice(a,foil)??1e9)-(scryPrice(b,foil)??1e9));
-  row.img = cardImg(ranked[0]);
-  row.scryUrl = ranked[0].scryfall_uri;
+  row.prints = found.prints.filter(c => hasFinish(c, foil))
+    .sort((a,b)=>(scryPrice(a,foil)??1e9)-(scryPrice(b,foil)??1e9))
+    .map(c => printInfo(c, foil, ck));
+  if(!row.prints.length){ row.status = foil ? "No foil printing" : "Only exists in foil"; return row; }
+  if(found.exact){
+    if(hasFinish(found.exact, foil)) row.pinId = found.exact.id;
+    else row.pinMiss = true;
+  }else if(item.set && !opts.anyPrint) row.pinMiss = true;
+  await priceRow(row);
+  return row;
+}
+
+// Fills the row's per-site prices from its pinned printing, or from all printings if none is pinned.
+async function priceRow(row){
+  const foil = row.foil;
+  const use = row.pinId ? row.prints.filter(p=>p.id===row.pinId) : row.prints;
+  row.sites = {}; row.ckBuy = null; row.eur = null; row.status = "ok";
+  row.img = use[0].img;
+  row.scryUrl = use[0].scryUrl;
 
   // Card Kingdom — cheapest in-stock printing. Buylist is for that same printing
   // (or the lowest offer across printings), so it reflects the copy you'd actually own.
-  const ck = await loadCK();
-  if(ck){
-    let ckBuyPick = null, minBuy = null;
-    for(const c of prints){
-      const e = ck.cards[c.id.replace(/-/g,"").slice(0,12)];
-      if(!e) continue;
-      const r = e[foil?4:1], b = e[foil?5:2];
-      const url = ck.base_url + (e[foil?3:0] || e[0] || e[3]);
-      if(r!=null && (!row.sites.ck || r<row.sites.ck.p)){
-        row.sites.ck = {p:r, url, print:printLabel(c)};
-        ckBuyPick = b!=null ? {p:b, url, print:printLabel(c)} : null;
-      }
-      if(b!=null && (!minBuy || b<minBuy.p)) minBuy = {p:b, url, print:printLabel(c)};
+  let ckBuyPick = null, minBuy = null;
+  for(const p of use){
+    if(!p.ck) continue;
+    const {r, b, url} = p.ck;
+    if(r!=null && (!row.sites.ck || r<row.sites.ck.p)){
+      row.sites.ck = {p:r, url, print:p.label};
+      ckBuyPick = b!=null ? {p:b, url, print:p.label} : null;
     }
-    row.ckBuy = ckBuyPick || minBuy;
+    if(b!=null && (!minBuy || b<minBuy.p)) minBuy = {p:b, url, print:p.label};
   }
+  row.ckBuy = ckBuyPick || minBuy;
 
   // Cardmarket € — reference only, not part of the USD totals
-  for(const c of prints){
-    const e = num(c.prices[foil?"eur_foil":"eur"]);
-    if(e!=null && (!row.eur || e<row.eur.p)) row.eur = {p:e, url:c.purchase_uris?.cardmarket || "", print:printLabel(c)};
-  }
+  for(const p of use)
+    if(p.eur!=null && (!row.eur || p.eur<row.eur.p)) row.eur = {p:p.eur, url:p.cmUrl, print:p.label};
 
-  // TCGplayer + Manapool — check the two cheapest printings
-  const cands = ranked.filter(c=>c.tcgplayer_id).slice(0,2);
-  const tts = await Promise.all(cands.map(c => ttPrices(c.tcgplayer_id, foil).then(t => t && {...t, c}).catch(()=>null)));
-  for(const t of tts){
+  // TCGplayer + Manapool — check the two cheapest printings (all of them once the dropdown has loaded them)
+  const cands = use.filter(p=>p.tcgplayerId).slice(0,2);
+  await Promise.all(cands.map(p => loadTT(p, foil)));
+  for(const p of use){
+    const t = p.tt;
     if(!t) continue;
     // market price, not the lowest listing — "low" is often one damaged or foreign copy
     const tp = t.tcgMkt ?? t.tcgLow;
     if(tp!=null && (!row.sites.tcg || tp<row.sites.tcg.p))
-      row.sites.tcg = {p:tp, low:t.tcgLow, url:t.tcgUrl || tcgSearch(row.name), print:printLabel(t.c)};
+      row.sites.tcg = {p:tp, low:t.tcgLow, url:t.tcgUrl || tcgSearch(row.name), print:p.label};
     if(t.mp!=null && (!row.sites.mp || t.mp<row.sites.mp.p))
-      row.sites.mp = {p:t.mp, url:t.mpUrl || mpSearch(row.name), print:printLabel(t.c)};
+      row.sites.mp = {p:t.mp, url:t.mpUrl || mpSearch(row.name), print:p.label};
   }
   // TCGTracking had nothing — fall back to Scryfall's copy of the TCGplayer market price
   if(!row.sites.tcg){
-    const c = ranked.find(c=>scryPrice(c,foil)!=null);
-    if(c) row.sites.tcg = {p:scryPrice(c,foil), low:null, url:c.purchase_uris?.tcgplayer || tcgSearch(row.name), print:printLabel(c)};
+    const p = use.find(p=>p.usd!=null);
+    if(p) row.sites.tcg = {p:p.usd, low:null, url:p.tcgUrl || tcgSearch(row.name), print:p.label};
   }
   if(!Object.keys(row.sites).length) row.status = "No prices listed";
-  return row;
+}
+
+// Opening the dropdown fetches TCGplayer + Manapool for every printing (capped, cheapest first).
+const PRINTS_SHOWN = 40;
+async function openPrints(row){
+  const todo = row.prints.slice(0, PRINTS_SHOWN).filter(p => p.tt===undefined && p.tcgplayerId);
+  let next = 0;
+  const worker = async () => {
+    while(next < todo.length){
+      await loadTT(todo[next++], row.foil);
+      if(!buyRows.includes(row)) return;
+      renderBuyResults();
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  if(!buyRows.includes(row)) return;
+  await priceRow(row);   // a printing further down may turn out cheaper on TCGplayer / Manapool
+  renderBuyResults();
 }
 
 const bestSite = (row) => {
@@ -738,14 +801,59 @@ function siteCell(row, k){
   return `<td class="num"><a class="mono ${SITES[k].cls}${best}" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(s.print)}">${money(s.p)}</a>${mkt}</td>`;
 }
 
-function buyRowHTML(r){
+function printsHTML(r, i){
+  const shown = r.prints.slice(0, PRINTS_SHOWN);
+  // once TCGTracking has answered, trust it over Scryfall's copy (Scryfall shows stray prices on rare printings)
+  const tcgOf = (p) => p.tt ? (p.tt.tcgMkt ?? p.tt.tcgLow) : p.usd;
+  const lowest = (f) => { const v = shown.map(f).filter(x=>x!=null); return v.length ? Math.min(...v) : null; };
+  const low = {tcg:lowest(tcgOf), mp:lowest(p=>p.tt?.mp), ck:lowest(p=>p.ck?.r)};
+  const cell = (v, url, cls, isLow) => v==null ? `<td class="num muted">—</td>` :
+    `<td class="num"><a class="mono ${cls}${isLow?" best":""}" href="${esc(url)}" target="_blank" rel="noopener">${money(v)}</a></td>`;
+
+  const rows = shown.map(p => {
+    const tcg = tcgOf(p);
+    const mp = p.tt===undefined && p.tcgplayerId ? `<td class="num muted">…</td>`
+      : cell(p.tt?.mp, p.tt?.mpUrl || mpSearch(r.name), "src-mp", p.tt?.mp!=null && p.tt.mp===low.mp);
+    const pinned = r.pinId===p.id;
+    return `<tr class="${pinned?"pinned":""}">
+      <td><div class="cardcell">
+        <a href="${esc(p.scryUrl)}" target="_blank" rel="noopener"><img class="thumb" src="${esc(p.img)}" alt="" loading="lazy"></a>
+        <div><div class="pset">${esc(p.setName)}</div><div class="print">${esc(p.label)}</div></div></div></td>
+      ${cell(tcg, p.tt?.tcgUrl || p.tcgUrl || tcgSearch(r.name), "src-tcg", tcg!=null && tcg===low.tcg)}
+      ${mp}
+      ${cell(p.ck?.r, p.ck?.url, "ck", p.ck?.r!=null && p.ck.r===low.ck)}
+      <td class="num">${p.ck?.b!=null ? `<a class="mono ck" href="${esc(p.ck.url)}" target="_blank" rel="noopener">${money(p.ck.b)}</a>` : `<span class="muted">—</span>`}</td>
+      <td class="num">${p.eur!=null ? `<a class="mono eur" href="${esc(p.cmUrl)}" target="_blank" rel="noopener">€${p.eur.toFixed(2)}</a>` : `<span class="muted">—</span>`}</td>
+      <td class="num">${pinned ? `<span class="badge low">Using</span>`
+        : `<button class="ghost-btn" data-act="pin" data-i="${i}" data-id="${esc(p.id)}">Use</button>`}</td>
+    </tr>`;
+  }).join("");
+
+  const more = r.prints.length > shown.length ? ` · showing the ${shown.length} cheapest of ${r.prints.length}` : "";
+  return `<tr class="prints-row"><td></td><td colspan="8">
+    <div class="prints-head">
+      <span class="eyebrow">${r.prints.length} printing${r.prints.length>1?"s":""}${more}</span>
+      ${r.pinId ? `<button class="ghost-btn" data-act="unpin" data-i="${i}">Use cheapest printing</button>` : ""}
+    </div>
+    <div class="table-scroll"><table class="spread-table prints-table">
+      <thead><tr><th>Printing</th><th class="num src-tcg">TCGplayer</th><th class="num src-mp">Manapool</th>
+        <th class="num ck">Card Kingdom</th><th class="num">CK buys at</th><th class="num">Cardmarket</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </td></tr>`;
+}
+
+function buyRowHTML(r, i){
   const pending = r.status==="pending";
   const k = pending ? null : bestSite(r);
-  const where = r.set && r.exact ? `${r.set.toUpperCase()}${r.cn?" #"+r.cn:""}` : (r.set ? "any printing (set not found)" : "any printing");
+  const pin = r.pinId && r.prints.find(p=>p.id===r.pinId);
+  const where = pin ? pin.label : (r.pinMiss ? "any printing (that printing not found)" : "any printing");
+  const toggle = r.prints && r.prints.length
+    ? `<button class="prints-toggle" data-act="toggle" data-i="${i}" aria-expanded="${r.open}">${r.prints.length} printing${r.prints.length>1?"s":""} ${r.open?"▴":"▾"}</button>` : "";
   const card = `<div class="cardcell">
       ${r.img ? `<a href="${esc(r.scryUrl)}" target="_blank" rel="noopener"><img class="thumb" src="${esc(r.img)}" alt="" loading="lazy"></a>` : `<span style="width:34px"></span>`}
       <div><div class="cname">${esc(r.name)}${r.foil?` <span class="badge low">Foil</span>`:""}</div>
-      <div class="print">${esc(where)}</div></div></div>`;
+      <div class="print">${esc(where)} ${toggle}</div></div></div>`;
   if(pending) return `<tr><td class="num mono">${r.qty}</td><td>${card}</td><td colspan="7" class="muted"><i>Looking up…</i></td></tr>`;
   if(r.status!=="ok") return `<tr><td class="num mono">${r.qty}</td><td>${card}</td><td colspan="7" style="color:#ff8a80"><i>${esc(r.status)}</i></td></tr>`;
   const ckBuy = r.ckBuy ? `<a class="mono ck" href="${esc(r.ckBuy.url)}" target="_blank" rel="noopener" title="${esc(r.ckBuy.print)}">${money(r.ckBuy.p)}</a>` : "—";
@@ -756,7 +864,7 @@ function buyRowHTML(r){
     <td class="eyebrow ${k?SITES[k].cls:""}" style="letter-spacing:.1em">${k?SITES[k].label:"—"}</td>
     <td class="num mono best">${k?money(r.qty*r.sites[k].p):"—"}</td>
     <td class="num muted">${ckBuy}</td><td class="num">${eur}</td>
-  </tr>`;
+  </tr>${r.open ? printsHTML(r, i) : ""}`;
 }
 
 function renderBuyResults(){
@@ -781,7 +889,7 @@ function renderBuyResults(){
     <div class="grid-controls" style="margin-bottom:14px">
       <div class="updated">${pending ? `Pricing ${cards} cards… ${buyRows.length-pending} of ${buyRows.length} lines done` :
         `${cards} cards · ${buyRows.length} lines${failed?` · ${failed} not priced`:""}`}</div>
-      <button class="ghost-btn" id="buyCopy">Copy results</button>
+      <button class="ghost-btn" id="buyCopy" data-act="copy">Copy results</button>
     </div>
     <section class="buy-summary">
       <div class="stat win"><div class="k mono">${money(sum.mix)}</div><div class="l eyebrow">Cheapest mix</div><div class="m">${esc(mixNote||"—")}</div></div>
@@ -797,8 +905,28 @@ function renderBuyResults(){
       <tbody>${buyRows.map(buyRowHTML).join("")}</tbody>
     </table></div>
     <p class="lowline" style="margin-top:18px">TCGplayer market price (cheapest listing beneath, any condition) · Manapool near-mint ·
-      Card Kingdom near-mint in stock · hover a price to see which printing it's for. ${ckNote}</p>`;
-  $("#buyCopy").addEventListener("click", copyBuyResults);
+      Card Kingdom near-mint in stock · hover a price to see which printing it's for, or open a card's printings to compare them all
+      and pick one. ${ckNote}</p>`;
+}
+
+// One listener on the results area handles the dropdown toggles, Use buttons and Copy.
+async function onBuyClick(e){
+  const btn = e.target.closest("[data-act]");
+  if(!btn) return;
+  const act = btn.dataset.act;
+  if(act==="copy"){ copyBuyResults(); return; }
+  const row = buyRows[+btn.dataset.i];
+  if(!row) return;
+  if(act==="toggle"){
+    row.open = !row.open;
+    renderBuyResults();
+    if(row.open) openPrints(row);
+  }else if(act==="pin" || act==="unpin"){
+    row.pinId = act==="pin" ? btn.dataset.id : null;
+    row.pinMiss = false;
+    await priceRow(row);
+    renderBuyResults();
+  }
 }
 
 function copyBuyResults(){
@@ -860,6 +988,7 @@ function renderBuy(){
     <div id="buyOut"></div>`;
   $("#buytext").value = store.get(BUY_KEY) || "";
   $("#buyGo").addEventListener("click", runBuyLookup);
+  $("#buyOut").addEventListener("click", onBuyClick);
   $("#buytext").addEventListener("keydown", e => { if(e.key==="Enter" && (e.ctrlKey||e.metaKey)) runBuyLookup(); });
   renderBuyResults();
 }
