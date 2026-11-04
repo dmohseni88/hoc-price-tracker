@@ -1,4 +1,8 @@
-# HOC Foil Price Tracker
+# Magic Gate
+
+My one-stop Magic: The Gathering price site. It started as the HOC Foil Price Tracker below and now also has a Buy List for pricing any cards.
+
+## HOC Foil Price Tracker
 
 Tracks daily foil (`usd_foil`) prices for the 39 special-guest / legendary cards
 from *The Hobbit* companion Commander set (HOC), sourced from the [Scryfall
